@@ -23,16 +23,17 @@ categories.workspace = true
 license.workspace = true
 
 [workspace.dependencies]
-derive_more = { version = "2.1.1", default-features = false }
-pin-project = "1.1.11"
+derive_more = { version = "2.1.1", default-features = false, features = ["debug"] }
 pretty_assertions = "1.4.1"
 tokio = { version = "1.51.0", default-features = false, features = ["macros", "rt-multi-thread"] }
 
 [dependencies]
+derive_more.workspace = true
 disguise-macros = { path = "./disguise-macros", package = "disguise-macros" }
-pin-project.workspace = true
+pin-project = "1.1.11"
 
 [dev-dependencies]
+futures = { version = "0.3.32", default-features = false, features = ["std"] }
 pretty_assertions.workspace = true
 tokio.workspace = true
 

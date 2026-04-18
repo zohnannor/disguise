@@ -1,8 +1,14 @@
 //! TODO: docs.
 
-use std::{any::Any, cell::RefCell, collections::HashMap, marker::PhantomData, pin::Pin, task};
+use std::{
+    any::Any, cell::RefCell, collections::HashMap, marker::PhantomData,
+    pin::Pin, sync::Arc, task,
+};
 
-pub use disguise_macros::{disguise_original as original, disguise_with as with};
+use derive_more::Debug;
+pub use disguise_macros::{
+    disguise_original as original, disguise_with as with,
+};
 use pin_project::pin_project;
 
 /// TODO: docs.
@@ -12,8 +18,8 @@ pub trait Disguise: Sized + 'static {
     ///
     /// # Errors
     ///
-    /// Otherwise, if no disguise is found, returns <code>[Err]\(args)</code> so
-    /// the caller can decide fallback logic.
+    /// Otherwise, if no disguise is found, returns <code>[Err]\ (args)</code>
+    /// so the caller can decide fallback logic.
     ///
     /// # Examples
     ///
@@ -35,15 +41,17 @@ pub trait Disguise: Sized + 'static {
     /// [`call`]: Function::call
     /// [0]: https://doc.rust-lang.org/reference/types/function-pointer.html
     #[inline]
-    fn disguise<Args>(target: impl FnPtr<Args, Output = Self>, args: Args) -> Result<Self, Args>
+    fn disguise<Args>(
+        target: impl FnPtr<Args, Output = Self>,
+        args: Args,
+    ) -> Result<Self, Args>
     where
         Args: 'static,
     {
         DISGUISE.with_borrow(|registry| {
-            if let Some(func) = registry
-                .get(&target.addr())
-                .and_then(|func| func.downcast_ref::<BoxedFunction<Args, Self>>())
-            {
+            if let Some(func) = registry.get(&target.addr()).and_then(|func| {
+                func.downcast_ref::<BoxedFunction<Args, Self>>()
+            }) {
                 Ok(func.call(args))
             } else {
                 Err(args)
@@ -67,7 +75,11 @@ pub trait Disguise: Sized + 'static {
     ///
     /// [`disguise`]: Self::disguise
     #[inline]
-    fn disguise_or<Args>(target: impl FnPtr<Args, Output = Self>, args: Args, default: Self) -> Self
+    fn disguise_or<Args>(
+        target: impl FnPtr<Args, Output = Self>,
+        args: Args,
+        default: Self,
+    ) -> Self
     where
         Args: 'static,
     {
@@ -121,7 +133,10 @@ pub trait Disguise: Sized + 'static {
     ///
     /// [`disguise`]: Self::disguise
     #[inline]
-    fn disguise_or_default<Args>(target: impl FnPtr<Args, Output = Self>, args: Args) -> Self
+    fn disguise_or_default<Args>(
+        target: impl FnPtr<Args, Output = Self>,
+        args: Args,
+    ) -> Self
     where
         Args: 'static,
         Self: Default,
@@ -134,11 +149,12 @@ impl<T: 'static> Disguise for T {}
 
 /// Unique identifier of a [`FnPtr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Ptr(*const ());
+pub struct Ptr(usize);
 
 /// Shortcut for a `dyn`amically dispatched `'static` [`Function`] of arguments
 /// `Args` and an output `Output`.
-pub type BoxedFunction<Args, Output> = Box<dyn Function<Args, Output = Output> + 'static>;
+pub type BoxedFunction<Args, Output> =
+    Arc<dyn Function<Args, Output = Output> + Send + Sync + 'static>;
 
 thread_local! {
     /// Registry of [`FnPtr`]s' [`Disguise`]d [`BoxedFunction`]s for the current
@@ -155,8 +171,8 @@ thread_local! {
 /// registry for a specific [`FnPtr`] `target` and upon [`Drop`] restores the
 /// `prev`ious state (if any) or removes the entry entirely.
 ///
-/// If you don't need to bind a guard to a variable to control its lifetime,
-/// use [`with_fn!`] instead, as it is more ergonomic.
+/// If you don't need to bind a guard to a variable to control its lifetime, use
+/// [`with_fn!`] instead, as it is more ergonomic.
 ///
 /// # Examples
 ///
@@ -191,9 +207,6 @@ pub struct ScopeGuard {
 
     /// Function pointer identifying the patched target.
     target: Ptr,
-
-    /// Marker to prevent accidental cross-thread usage.
-    _not_send: PhantomData<Ptr>,
 }
 
 impl ScopeGuard {
@@ -234,14 +247,25 @@ impl ScopeGuard {
         Args: 'static,
         Output: 'static,
         F: FnPtr<Args, Output = Output>,
-        D: Function<Args, Output = Output> + 'static,
+        D: Function<Args, Output = Output> + Send + Sync + 'static,
     {
-        let target = target.addr();
-        let disguise: BoxedFunction<Args, Output> = Box::new(disguise);
+        Self::new_raw(target.addr(), Arc::new(disguise))
+    }
+
+    #[inline]
+    fn new_raw<Args, Output>(
+        target: Ptr,
+        disguise: BoxedFunction<Args, Output>,
+    ) -> Self
+    where
+        Args: 'static,
+        Output: 'static,
+    {
         Self {
             target,
-            prev: DISGUISE.with_borrow_mut(|registry| registry.insert(target, Box::new(disguise))),
-            _not_send: PhantomData,
+            prev: DISGUISE.with_borrow_mut(|registry| {
+                registry.insert(target, Box::new(disguise))
+            }),
         }
     }
 }
@@ -320,24 +344,34 @@ impl Drop for ScopeGuard {
 /// ```
 #[pin_project]
 #[derive(Debug)]
-pub struct DisguiseScope<Fut: ?Sized> {
-    /// [`ScopeGuard`] to restore the previous disguise.
-    guard: ScopeGuard,
+pub struct DisguiseScope<Args, Output, Fut: ?Sized> {
+    target: Ptr,
+
+    #[debug(skip)]
+    disguise: BoxedFunction<Args, Output>,
 
     /// Original [`Future`] to have a function [`Disguise`]d inside of it.
     #[pin]
     fut: Fut,
 }
 
-impl<Fut> Future for DisguiseScope<Fut>
+impl<Args, Output, Fut> Future for DisguiseScope<Args, Output, Fut>
 where
+    Args: 'static,
+    Output: 'static,
     Fut: Future + ?Sized,
 {
     type Output = Fut::Output;
 
     #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        self.project().fut.poll(cx)
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Self::Output> {
+        let this = self.project();
+        let _guard =
+            ScopeGuard::new_raw(*this.target, Arc::clone(this.disguise));
+        this.fut.poll(cx)
     }
 }
 
@@ -372,8 +406,8 @@ where
 /// # });
 /// ```
 pub trait DisguiseScopeExt: Future + Sized {
-    /// [`Disguise`]s the `target` [`FnPtr`] with the provided
-    /// `disguise` [`Function`] for the [`DisguiseScope`] of this [`Future`].
+    /// [`Disguise`]s the `target` [`FnPtr`] with the provided `disguise`
+    /// [`Function`] for the [`DisguiseScope`] of this [`Future`].
     ///
     /// If you only have one value to disguise the `target` with, consider using
     /// [`DisguiseScopeExt::disguise_with_value`] instead.
@@ -407,14 +441,15 @@ pub trait DisguiseScopeExt: Future + Sized {
     fn disguise_with<Args, Output>(
         self,
         target: impl FnPtr<Args, Output = Output>,
-        disguise: impl Function<Args, Output = Output> + 'static,
-    ) -> DisguiseScope<Self>
+        disguise: impl Function<Args, Output = Output> + Send + Sync + 'static,
+    ) -> DisguiseScope<Args, Output, Self>
     where
         Args: 'static,
         Output: 'static,
     {
         DisguiseScope {
-            guard: ScopeGuard::new(target, disguise),
+            target: target.addr(),
+            disguise: Arc::new(disguise),
             fut: self,
         }
     }
@@ -457,10 +492,10 @@ pub trait DisguiseScopeExt: Future + Sized {
         self,
         target: impl FnPtr<Args, Output = Output>,
         disguise: Output,
-    ) -> DisguiseScope<Self>
+    ) -> DisguiseScope<Args, Output, Self>
     where
         Args: 'static,
-        Output: Clone + 'static,
+        Output: Clone + Send + Sync + 'static,
     {
         self.disguise_with(target, ValueDisguise(disguise))
     }
@@ -472,8 +507,8 @@ impl<Fut> DisguiseScopeExt for Fut where Fut: Future {}
 
 /// A callable object abstraction.
 ///
-/// Represents an [`Fn`] closure or a [function pointer][0] that takes
-/// a tuple of `Args` and returns an `Output`.
+/// Represents an [`Fn`] closure or a [function pointer][0] that takes a tuple
+/// of `Args` and returns an `Output`.
 ///
 /// It is implemented for [`Fn`]s of up to 13 `Args`.
 ///
@@ -577,7 +612,7 @@ macro_rules! impl_functions {
                     reason = "storing function's address to fetch it later"
                 )]
                 {
-                    Ptr(self as *const ())
+                    Ptr(self as *const () as usize)
                 }
             }
         }
@@ -631,10 +666,10 @@ pub mod __internal {
     /// This trait is implemented for all [`FnOnce`] functions of up to 13
     /// arguments. Function items receive this implementation, and we abuse this
     /// fact to [`coerce`] them to [function pointer][1]s by extracting their
-    /// `Args` and [`Output`] signature and requiring to pass the same
-    /// function as a `target` argument. This way the [function item][0] is
-    /// coerced to a [function pointer][1] in the argument position without
-    /// explicitly specifying the [`primitive@fn`] signature.
+    /// `Args` and [`Output`] signature and requiring to pass the same function
+    /// as a `target` argument. This way the [function item][0] is coerced to a
+    /// [function pointer][1] in the argument position without explicitly
+    /// specifying the [`primitive@ fn`] signature.
     ///
     /// # Note
     ///
@@ -670,7 +705,10 @@ pub mod __internal {
         /// [`Output`]: Self::Output
         /// [1]: https://doc.rust-lang.org/reference/types/function-pointer.html
         #[inline]
-        fn coerce(self, target: FnPtr<Args, Self::Output>) -> FnPtr<Args, Self::Output> {
+        fn coerce(
+            self,
+            target: FnPtr<Args, Self::Output>,
+        ) -> FnPtr<Args, Self::Output> {
             target
         }
     }
@@ -721,13 +759,16 @@ pub mod __internal {
         Output: Clone,
     {
         /// Returns a <code>impl [Function]<Args, [Output] = Output></code> that
-        /// ignores its `Args` and returns a [`Clone`] of `Output`
-        /// `value` on each [`call`].
+        /// ignores its `Args` and returns a [`Clone`] of `Output` `value` on
+        /// each [`call`].
         ///
         /// [`Output`]: Function::Output
         /// [`call`]: Function::call
         #[inline]
-        pub fn __into_disguise(self, value: T) -> impl Function<Args, Output = Output> {
+        pub fn __into_disguise(
+            self,
+            value: T,
+        ) -> impl Function<Args, Output = Output> {
             ValueDisguise(value.into())
         }
     }
@@ -760,7 +801,10 @@ pub mod __internal {
         ///
         /// [Output]: Function::Output
         #[inline]
-        pub fn __into_disguise(self, func: F) -> impl Function<Args, Output = Output> {
+        pub fn __into_disguise(
+            self,
+            func: F,
+        ) -> impl Function<Args, Output = Output> {
             func
         }
     }
@@ -881,13 +925,15 @@ macro_rules! with_fn {
 
 #[cfg(test)]
 mod spec {
-    #![expect(clippy::panic, clippy::arithmetic_side_effects, reason = "test code")]
-
-    use std::future;
+    #![expect(
+        clippy::panic,
+        clippy::arithmetic_side_effects,
+        reason = "test code"
+    )]
 
     use pretty_assertions::assert_eq;
 
-    use super::*;
+    use crate::Disguise;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct FooId(u128);
@@ -911,16 +957,20 @@ mod spec {
         }
 
         fn from_sum(id1: u128, id2: u128) -> Self {
-            Self::disguise_or_else(coerce_fn!(Self::from_sum), (id1, id2), |id1, id2| {
-                Self(id1 + id2)
-            })
+            Self::disguise_or_else(
+                coerce_fn!(Self::from_sum),
+                (id1, id2),
+                |id1, id2| Self(id1 + id2),
+            )
         }
 
         fn generic<T>(id: T) -> Self
         where
             T: Into<u128> + 'static,
         {
-            Self::disguise_or_else(coerce_fn!(Self::generic), (id,), |id: T| Self(id.into()))
+            Self::disguise_or_else(coerce_fn!(Self::generic), (id,), |id: T| {
+                Self(id.into())
+            })
         }
 
         fn non_self_return() -> u32 {
@@ -928,9 +978,11 @@ mod spec {
         }
 
         fn self_receiver(self) -> u128 {
-            Disguise::disguise_or_else(coerce_fn!(Self::self_receiver), (self,), |this: Self| {
-                this.0
-            })
+            Disguise::disguise_or_else(
+                coerce_fn!(Self::self_receiver),
+                (self,),
+                |this: Self| this.0,
+            )
         }
     }
 
@@ -942,6 +994,7 @@ mod spec {
         Disguise::disguise_or(coerce_fn!(standalone_same_return_type), (), 0)
     }
 
+    #[track_caller]
     fn assert(foo: u128, bar: u128) {
         assert_eq!(FooId::new(), FooId(foo));
         assert_eq!(BarId::new(), BarId(bar));
@@ -952,7 +1005,9 @@ mod spec {
 
         use pretty_assertions::assert_eq;
 
-        use super::*;
+        use super::{
+            BarId, FooId, assert, standalone, standalone_same_return_type,
+        };
 
         #[test]
         fn basic_scope() {
@@ -1021,6 +1076,7 @@ mod spec {
         #[test]
         fn arguments() {
             assert_eq!(BarId::from(0), BarId(0));
+            assert_eq!(BarId::from_sum(21, 21), BarId(42));
 
             {
                 with_fn!(BarId::from = |x: u128| BarId(x + 1));
@@ -1038,6 +1094,7 @@ mod spec {
             }
 
             assert_eq!(BarId::from(0), BarId(0));
+            assert_eq!(BarId::from_sum(21, 21), BarId(42));
         }
 
         #[test]
@@ -1081,8 +1138,12 @@ mod spec {
             assert_eq!(BarId::generic(21_u16), BarId(21));
 
             {
-                with_fn!(BarId::generic::<u64> = |id| BarId(u128::from(id) * 2),);
-                with_fn!(BarId::generic::<u32> = |id| BarId(u128::from(id) * 2),);
+                with_fn!(
+                    BarId::generic::<u64> = |id| BarId(u128::from(id) * 2)
+                );
+                with_fn!(
+                    BarId::generic::<u32> = |id| BarId(u128::from(id) * 2)
+                );
                 assert_eq!(BarId::generic(21_u64), BarId(42));
                 assert_eq!(BarId::generic(21_u32), BarId(42));
                 assert_eq!(BarId::generic(21_u16), BarId(21));
@@ -1143,9 +1204,15 @@ mod spec {
     }
 
     mod r#async {
+        use std::{future, panic::AssertUnwindSafe, task};
+
+        use futures::FutureExt as _;
         use pretty_assertions::assert_eq;
 
-        use super::*;
+        use super::{
+            BarId, FooId, assert, standalone, standalone_same_return_type,
+        };
+        use crate::DisguiseScopeExt as _;
 
         async fn yield_now() {
             let mut yielded = false;
@@ -1218,11 +1285,11 @@ mod spec {
         }
 
         #[tokio::test]
-        async fn multiple_disguises_uses_outer() {
+        async fn multiple_disguises_uses_inner() {
             assert(0, 0);
 
             async {
-                assert(69, 0);
+                assert(42, 0);
             }
             .disguise_with_value(coerce_fn!(FooId::new), FooId(42))
             .disguise_with_value(coerce_fn!(FooId::new), FooId(69))
@@ -1250,7 +1317,9 @@ mod spec {
             async {
                 assert_eq!(BarId::from_sum(21, 21), BarId(21 * 21));
             }
-            .disguise_with(coerce_fn!(BarId::from_sum), |id1, id2| BarId(id1 * id2))
+            .disguise_with(coerce_fn!(BarId::from_sum), |id1, id2| {
+                BarId(id1 * id2)
+            })
             .await;
 
             assert_eq!(BarId::from(0), BarId(0));
@@ -1303,34 +1372,57 @@ mod spec {
         }
 
         #[tokio::test]
-        #[ignore = "TODO: requires Send + unwind support"]
         async fn panic_inside_disguise_call() {
             assert(0, 0);
 
-            async {
-                assert(42, 0);
-            }
-            .disguise_with(coerce_fn!(FooId::new), || {
-                panic!("oops");
-            })
-            // .catch_unwind()
+            let status = AssertUnwindSafe(
+                async {
+                    assert(42, 0);
+                }
+                .disguise_with(coerce_fn!(FooId::new), || {
+                    panic!("oops");
+                }),
+            )
+            .catch_unwind()
             .await;
+
+            assert!(status.is_err(), "thread panicked");
 
             assert(0, 0);
         }
 
         #[tokio::test]
-        #[ignore = "TODO: requires Send + unwind support"]
         async fn panic_inside_disguise_scope() {
             assert(0, 0);
 
-            async {
-                assert(42, 0);
-                panic!("oops");
-            }
-            .disguise_with_value(coerce_fn!(FooId::new), FooId(42))
+            let status = AssertUnwindSafe(
+                async {
+                    assert(42, 0);
+                    panic!("oops");
+                }
+                .disguise_with_value(coerce_fn!(FooId::new), FooId(42)),
+            )
+            .catch_unwind()
             .await;
 
+            assert!(status.is_err(), "thread panicked");
+
+            assert(0, 0);
+        }
+
+        #[tokio::test]
+        async fn doesnt_disguise_after_polling() {
+            assert(0, 0);
+
+            let mut fut = std::pin::pin!(
+                async {
+                    assert(42, 0);
+                }
+                .disguise_with_value(coerce_fn!(FooId::new), FooId(42))
+            );
+
+            assert(0, 0);
+            fut.as_mut().await;
             assert(0, 0);
         }
 
@@ -1358,8 +1450,6 @@ mod spec {
             assert_eq!(BarId::generic(21_u16), BarId(21));
         }
 
-        // TODO: replace `with_fn!` with `disguise_with_value`, but that
-        // requires `Send`
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn thread_local() {
             assert(0, 0);
@@ -1374,11 +1464,12 @@ mod spec {
 
             assert!(res1.is_ok(), "task spawned and ran successfully");
 
-            let res2 = tokio::spawn(async {
-                with_fn!(FooId::new = FooId(69));
-
-                assert(69, 0);
-            })
+            let res2 = tokio::spawn(
+                async {
+                    assert(69, 0);
+                }
+                .disguise_with_value(coerce_fn!(FooId::new), FooId(69)),
+            )
             .await;
 
             assert!(res2.is_ok(), "task spawned and ran successfully");
@@ -1401,7 +1492,10 @@ mod spec {
             }
             .disguise_with_value(coerce_fn!(BarId::non_self_return), 42_u32)
             .disguise_with_value(coerce_fn!(standalone), 69_u32)
-            .disguise_with_value(coerce_fn!(standalone_same_return_type), 666_u32)
+            .disguise_with_value(
+                coerce_fn!(standalone_same_return_type),
+                666_u32,
+            )
             .disguise_with_value(coerce_fn!(BarId::self_receiver), 123_u128)
             .await;
 
@@ -1421,8 +1515,8 @@ mod spec {
             }
             .disguise_with_value(coerce_fn!(FooId::new), FooId(42));
 
-            let fut2 =
-                async { FooId::new() }.disguise_with_value(coerce_fn!(FooId::new), FooId(69));
+            let fut2 = async { FooId::new() }
+                .disguise_with_value(coerce_fn!(FooId::new), FooId(69));
 
             assert_eq!(tokio::join!(fut1, fut2), (FooId(42), FooId(69)));
         }
@@ -1431,7 +1525,8 @@ mod spec {
     mod assert {
         use pretty_assertions::assert_eq;
 
-        use super::*;
+        use super::{FooId, assert};
+        use crate::{Disguise, ScopeGuard, ValueDisguise};
 
         #[expect(clippy::inline_always, reason = "test example")]
         #[test]
@@ -1495,6 +1590,7 @@ mod spec {
             with_fn!(bar = |n: u32| if n == 0 { 200 } else { foo(n - 1) });
 
             assert_eq!(foo(3), 200);
+            assert_eq!(foo(4), 100);
         }
 
         // TODO: fix?
@@ -1502,8 +1598,14 @@ mod spec {
         fn drop_reorder_breaks_stack() {
             assert(0, 0);
             {
-                let guard1 = ScopeGuard::new(coerce_fn!(FooId::new), ValueDisguise(FooId(42)));
-                let guard2 = ScopeGuard::new(coerce_fn!(FooId::new), ValueDisguise(FooId(69)));
+                let guard1 = ScopeGuard::new(
+                    coerce_fn!(FooId::new),
+                    ValueDisguise(FooId(42)),
+                );
+                let guard2 = ScopeGuard::new(
+                    coerce_fn!(FooId::new),
+                    ValueDisguise(FooId(69)),
+                );
 
                 assert(69, 0);
 
