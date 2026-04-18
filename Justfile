@@ -11,7 +11,7 @@ default:
 
 # Run all checks (~local CI, but allows warnings)
 [group('development')]
-ci: fmt lint doc test (coverage "lcov") (coverage "text")
+ci: fmt lint doc test (coverage "lcov") coverage
     @echo "All checks passed! :)"
 
 ################################################################################
@@ -22,7 +22,7 @@ ci: fmt lint doc test (coverage "lcov") (coverage "text")
 [group('lint')]
 [arg("check", long="check", value="true")]
 fmt check="":
-    cargo fmt --all {{ if check == "" { "" } else { "-- --check" } }}
+    cargo +nightly fmt --all {{ if check == "" { "" } else { "-- --check" } }}
 
 # Run clippy
 [group('lint')]
@@ -75,14 +75,16 @@ alias t := test
 # Generate code coverage report
 [group('lint')]
 [arg("format", long="format")] 
-coverage format="text":
+coverage format="":
     cargo llvm-cov --all-targets --all-features --workspace {{
         if format == "lcov" {
             "--lcov --output-path lcov.info"
         } else if format == "html" {
             "--html"
-        } else {
+        } else if format == "text" {
             "--text"
+        } else {
+            ""
         }
     }}
 
