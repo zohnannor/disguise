@@ -63,8 +63,8 @@ lint: (clippy "" "" "y" "y" "y" "y")
 # Run tests
 [group('lint')]
 test:
-    cargo hack test --all-targets --feature-powerset --workspace --exclude e2e
-    # cargo hack test --doc --all-features --workspace
+    cargo hack test --all-targets --feature-powerset --workspace
+    cargo hack test --doc --feature-powerset --workspace
 
 alias t := test
 

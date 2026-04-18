@@ -147,12 +147,12 @@ pub trait Disguise: Sized + 'static {
 
 impl<T: 'static> Disguise for T {}
 
-/// Unique identifier of a [`FnPtr`].
+/// Unique identifier of an [`FnPtr`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ptr(usize);
 
-/// Shortcut for a `dyn`amically dispatched `'static` [`Function`] of arguments
-/// `Args` and an output `Output`.
+/// Shortcut for a `dyn`amically dispatched `'static` thread-safe [`Function`]
+/// of arguments `Args` and an output `Output`.
 pub type BoxedFunction<Args, Output> =
     Arc<dyn Function<Args, Output = Output> + Send + Sync + 'static>;
 
@@ -210,8 +210,8 @@ pub struct ScopeGuard {
 }
 
 impl ScopeGuard {
-    /// Places a new `disguise` [`Function`] for `target` [`FnPtr`] into
-    /// registry until this guard is [`Drop`]ped.
+    /// Creates a new [`ScopeGuard`], placing a new `disguise` [`Function`] for
+    /// `target` [`FnPtr`] into registry until this guard is [`Drop`]ped.
     ///
     /// The previous disguise (if any) is stored and will be restored upon
     /// [`Drop`]ping.
@@ -252,6 +252,11 @@ impl ScopeGuard {
         Self::new_raw(target.addr(), Arc::new(disguise))
     }
 
+    /// Creates a new [`ScopeGuard`], placing a new [`BoxedFunction`] into
+    /// registry until this guard is [`Drop`]ped.
+    ///
+    /// [`target`]: Self::target
+    /// [`disguise`]: Self::disguise
     #[inline]
     fn new_raw<Args, Output>(
         target: Ptr,
@@ -286,14 +291,14 @@ impl Drop for ScopeGuard {
 /// A [`Future`] that carries a [`Disguise`] scope.
 ///
 /// This struct is created by the [`DisguiseScopeExt::disguise_with`] or
-/// [`DisguiseScopeExt::disguise_with_value`] methods. It wraps an inner future
-/// and installs a disguise for the duration of that [`Future`]'s execution.
+/// [`DisguiseScopeExt::disguise_with_value`] methods. It wraps an inner
+/// [`Future`] and installs a [`Disguise`] for the duration of that [`Future`]'s
+/// [`poll`] execution.
 ///
-/// [`DisguiseScope`] is <code>\![Send]</code>; if you need to `spawn` a
-/// disguised future, consider disguising on the target thread using
-/// [`with_fn!`] instead:
+/// [`DisguiseScope`] is both [`Send`] and [`Sync`], so it can be `spawn`ed onto
+/// multi‑threaded executors like [`tokio`]:
 ///
-/// ```rust,compile_fail
+/// ```rust
 /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
 /// # use disguise::{coerce_fn, Disguise, DisguiseScopeExt as _};
 /// fn greet(name: &'static str) -> String {
@@ -303,50 +308,29 @@ impl Drop for ScopeGuard {
 ///     // ...
 /// }
 ///
-/// assert_eq!(greet("Alice"), "Hello, Alice!");
-///
 /// tokio::spawn(
 ///     async {
 ///         assert_eq!(greet("Alice"), "Goodbye, Alice!");
 ///     }
-///     .disguise_with(coerce_fn!(greet), |name| format!("Goodbye, {name}!")),
-/// //   ^^^^^^^^^^^^^
-/// //   `(dyn Any + 'static)` cannot be sent between threads safely
-/// //   `*const ()` cannot be sent between threads safely
-/// )
-/// .await;
-///
-/// assert_eq!(greet("Alice"), "Hello, Alice!");
+///     .disguise_with(coerce_fn!(greet), |name| format!("Goodbye, {name}!"))
+/// ).await;
 /// # });
 /// ```
 ///
-/// Do this instead:
-///
-/// ```rust
-/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
-/// # use disguise::{coerce_fn, Disguise, DisguiseScopeExt as _};
-/// # fn greet(name: &'static str) -> String {
-/// #   Disguise::disguise_or_else(coerce_fn!(greet), (name,), |name| {
-/// #       format!("Hello, {name}!")
-/// #   })
-/// # }
-/// #
-/// # assert_eq!(greet("Alice"), "Hello, Alice!");
-/// #
-/// tokio::spawn(async {
-///     disguise::with_fn!(greet = |name| format!("Goodbye, {name}!"));
-///     assert_eq!(greet("Alice"), "Goodbye, Alice!");
-/// })
-/// .await;
-/// #
-/// # assert_eq!(greet("Alice"), "Hello, Alice!");
-/// # });
-/// ```
+/// [`poll`]: Future::poll
+/// [`tokio`]: https://docs.rs/tokio
 #[pin_project]
 #[derive(Debug)]
 pub struct DisguiseScope<Args, Output, Fut: ?Sized> {
+    /// [Function pointer][0] identifying the [`Disguise`]d target.
+    ///
+    /// [0]: https://doc.rust-lang.org/reference/types/function-pointer.html
     target: Ptr,
 
+    /// [`BoxedFunction`] to be called inside the [`DisguiseScope`] as a
+    /// [`Disguise`] for [`target`].
+    ///
+    /// [`target`]: Self::target
     #[debug(skip)]
     disguise: BoxedFunction<Args, Output>,
 
@@ -1411,7 +1395,7 @@ mod spec {
         }
 
         #[tokio::test]
-        async fn doesnt_disguise_after_polling() {
+        async fn does_not_disguise_after_polling() {
             assert(0, 0);
 
             let mut fut = std::pin::pin!(
@@ -1526,7 +1510,7 @@ mod spec {
         use pretty_assertions::assert_eq;
 
         use super::{FooId, assert};
-        use crate::{Disguise, ScopeGuard, ValueDisguise};
+        use crate::{Disguise, DisguiseScope, ScopeGuard, ValueDisguise};
 
         #[expect(clippy::inline_always, reason = "test example")]
         #[test]
@@ -1560,13 +1544,13 @@ mod spec {
             with_fn!(qux = || 123_u32);
             with_fn!(quux = || 1984_u32);
 
-            let foofn = || Disguise::disguise_or_default(coerce_fn!(foo), ());
-            let barfn = || Disguise::disguise_or_default(coerce_fn!(bar), ());
+            let foo_fn = || Disguise::disguise_or_default(coerce_fn!(foo), ());
+            let bar_fn = || Disguise::disguise_or_default(coerce_fn!(bar), ());
 
             assert_eq!(foo(), 0_u32);
             assert_eq!(bar(), 0_u32);
-            assert_eq!(foofn(), 42_u32);
-            assert_eq!(barfn(), 0_u32);
+            assert_eq!(foo_fn(), 42_u32);
+            assert_eq!(bar_fn(), 0_u32);
             assert_eq!(baz(), 666_u32);
             assert_eq!(qux(), 123_u32);
             assert_eq!(quux(), 666_u32);
@@ -1650,6 +1634,14 @@ mod spec {
             assert_eq!(greet("Alice"), "Hello, Alice!");
             with_fn!(greet = "Hello, disguised!".to_owned());
             assert_eq!(greet("Alice"), "Hello, disguised!");
+        }
+
+        #[test]
+        fn send() {
+            use std::future::Ready;
+
+            const fn assert_send_sync<T: Future + Send + Sync + ?Sized>() {}
+            assert_send_sync::<DisguiseScope<(), (), Ready<()>>>();
         }
     }
 }
