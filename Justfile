@@ -54,7 +54,6 @@ clippy fix="" force="" hack="" extra="" meta="" docs="":
         {{ if docs == "" { ""
         } else { "" } }}
 
-
 alias c := clippy
 
 # Run clippy with all lints
@@ -75,8 +74,8 @@ alias t := test
 
 # Generate code coverage report
 [group('lint')]
-[arg("format", long="format", value="text")]
-coverage format="":
+[arg("format", long="format")] 
+coverage format="text":
     cargo llvm-cov --all-targets --all-features --workspace {{
         if format == "lcov" {
             "--lcov --output-path lcov.info"
@@ -85,7 +84,7 @@ coverage format="":
         } else {
             "--text"
         }
-    }} --exclude e2e
+    }}
 
 alias cov := coverage
 

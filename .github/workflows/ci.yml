@@ -26,10 +26,9 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - name: Add rustfmt component
-              run: rustup component add rustfmt
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  components: rustfmt
             - uses: taiki-e/install-action@just
               # not used, but required in justfile
             - uses: taiki-e/install-action@cargo-hack
@@ -40,10 +39,9 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - name: Add clippy component
-              run: rustup component add clippy
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  components: clippy
             - uses: taiki-e/install-action@just
             - uses: taiki-e/install-action@cargo-hack
             - run: just lint
@@ -54,8 +52,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
             - uses: taiki-e/install-action@just
             - uses: taiki-e/install-action@cargo-hack
             - run: just test
@@ -66,10 +63,9 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - name: Add rust-docs component
-              run: rustup component add rust-docs
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  components: rust-docs
             - uses: taiki-e/install-action@just
             - uses: taiki-e/install-action@cargo-hack
             - run: just doc --private
@@ -80,8 +76,7 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
             - run: cargo build
 
     coverage:
@@ -90,12 +85,11 @@ jobs:
         steps:
             - uses: actions/checkout@v6
             - name: Install pinned toolchain
-              run: rustup toolchain install
-            - uses: Swatinem/rust-cache@v2
+              uses: actions-rust-lang/setup-rust-toolchain@v1
             - uses: taiki-e/install-action@just
             - uses: taiki-e/install-action@cargo-hack
             - uses: taiki-e/install-action@cargo-llvm-cov
-            - run: just coverage
+            - run: just coverage --format lcov
             - name: Upload coverage to Codecov
               uses: codecov/codecov-action@v4
               with:
